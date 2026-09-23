@@ -1,4 +1,3 @@
-"""
 Grover-Based Fault Detection on Real IoT Data
 =============================================
 This script implements a hybrid quantum-classical framework for fault detection
@@ -8,9 +7,7 @@ with a real-fault oracle, and evaluates performance under ideal and noisy
 conditions. It also generates figures for the paper.
 
 Requirements:
-    pip install qiskit qiskit-aer pandas numpy matplotlib
-"""
-
+pip install qiskit qiskit-aer pandas numpy matplotlib
 import pandas as pd
 import numpy as np
 import math
@@ -45,36 +42,82 @@ FIG3 = 'figure3_noise.png'
 # ============================================================
 
 def load_real_iot_data(csv_path, num_items=128, seed=RANDOM_SEED):
-    """Load and preprocess a real IoT sensor dataset."""
+    """Load and preprocess a real IoT sensor dataset.
+
+    Supports two dataset layouts:
+      1) "Wide" format: one column per sensor feature
+         (e.g. temperature_celsius, humidity_percent, ...).
+      2) "Long" format: one row per individual sensor reading, with a
+         Sensor_Type/Value pair (and optionally a ground-truth
+         Oracle_Target/Anomaly column).
+
+    Returns:
+        normalized      : normalized feature dataframe
+        feature_cols    : list of feature column names used
+        oracle_labels   : boolean array of ground-truth fault labels if the
+                           dataset provides them, otherwise None
+    """
     df = pd.read_csv(csv_path)
 
+    # --- Layout 1: wide format --------------------------------------
     feature_cols = []
     for col in ['temperature_celsius', 'humidity_percent', 'noise_level_db',
                 'temperature', 'humidity', 'voltage', 'RSSI', 'SNR']:
         if col in df.columns:
             feature_cols.append(col)
 
-    if len(feature_cols) < 2:
-        raise ValueError("At least 2 sensor feature columns are required.")
+    if len(feature_cols) >= 2:
+        df_features = df[feature_cols].dropna()
 
-    df_features = df[feature_cols].dropna()
+        if len(df_features) > num_items:
+            df_subset = df_features.sample(n=num_items, random_state=seed)
+        else:
+            df_subset = df_features
 
-    if len(df_features) > num_items:
-        df_subset = df_features.sample(n=num_items, random_state=seed)
-    else:
-        df_subset = df_features
+        normalized = (df_subset - df_subset.min()) / (df_subset.max() - df_subset.min())
+        normalized = normalized.reset_index(drop=True)
+        return normalized, feature_cols, None
 
-    normalized = (df_subset - df_subset.min()) / (df_subset.max() - df_subset.min())
+    # --- Layout 2: long format (Sensor_Type / Value [/ Oracle_Target]) --
+    if {'Sensor_Type', 'Value'}.issubset(df.columns):
+        df = df.dropna(subset=['Sensor_ID', 'Value']).reset_index(drop=True)
 
-    return normalized, feature_cols
+        if len(df) > num_items:
+            df_subset = df.sample(n=num_items, random_state=seed).reset_index(drop=True)
+        else:
+            df_subset = df.reset_index(drop=True)
+
+        value_col = df_subset[['Value']].rename(columns={'Value': 'sensor_value'})
+        normalized = (value_col - value_col.min()) / (value_col.max() - value_col.min())
+
+        oracle_labels = None
+        if 'Oracle_Target' in df_subset.columns:
+            oracle_labels = df_subset['Oracle_Target'].fillna(0).astype(bool).values
+
+        return normalized, ['sensor_value'], oracle_labels
+
+    raise ValueError(
+        "Could not find at least 2 recognized sensor feature columns, and no "
+        "Sensor_Type/Value long-format columns were found either."
+    )
 
 
 # ============================================================
 # 2. FAULT CRITERION DEFINITION
 # ============================================================
 
-def define_fault_criterion(df_normalized, feature_cols):
-    """Define fault criteria using the IQR method on temperature readings."""
+def define_fault_criterion(df_normalized, feature_cols, oracle_labels=None):
+    """Define fault criteria.
+
+    If the dataset already provides ground-truth fault labels
+    (oracle_labels, from an Oracle_Target/Anomaly column), use them
+    directly. Otherwise, fall back to the IQR method on a temperature
+    column (or a percentile threshold if no temperature column exists).
+    """
+    if oracle_labels is not None:
+        thresholds = {'method': 'oracle_ground_truth'}
+        return oracle_labels, thresholds
+
     temp_col = None
     for col in feature_cols:
         if 'temp' in col.lower():
@@ -265,8 +308,7 @@ def plot_complexity_comparison(N, M, iterations, filename=FIG1):
 
     plt.tight_layout()
     plt.savefig(filename, dpi=300, bbox_inches='tight')
-    #plt.close()
-    plt.show()
+    plt.close()
     print(f"[OK] Figure 1 saved: {filename}")
 
 
@@ -296,8 +338,7 @@ def plot_fault_distribution(fault_labels, filename=FIG2):
 
     plt.tight_layout()
     plt.savefig(filename, dpi=300, bbox_inches='tight')
-    #plt.close()
-    plt.show()
+    plt.close()
     print(f"[OK] Figure 2 saved: {filename}")
 
 
@@ -321,8 +362,7 @@ def plot_noise_impact(noise_levels, success_probs, filename=FIG3):
 
     plt.tight_layout()
     plt.savefig(filename, dpi=300, bbox_inches='tight')
-
-    plt.show()
+    plt.close()
     print(f"[OK] Figure 3 saved: {filename}")
 
 
@@ -335,23 +375,15 @@ def main():
     print("Grover-Based Fault Detection on Real IoT Data")
     print("=" * 60)
 
-    # Step 1: Load real data (fallback to simulated if not found)
-    try:
-        df_normalized, feature_cols = load_real_iot_data(CSV_PATH, num_items=128)
-        print(f"\n[OK] Data loaded: {len(df_normalized)} records")
-        print(f"     Features: {feature_cols}")
-    except FileNotFoundError:
-        print(f"\n[WARN] File {CSV_PATH} not found. Using simulated real data...")
-        np.random.seed(RANDOM_SEED)
-        df_normalized = pd.DataFrame({
-            'temperature_celsius': np.random.normal(25, 5, 128),
-            'humidity_percent': np.random.normal(60, 15, 128),
-            'noise_level_db': np.random.normal(50, 10, 128)
-        })
-        feature_cols = ['temperature_celsius', 'humidity_percent', 'noise_level_db']
+    # Step 1: Load real data (no synthetic fallback)
+    df_normalized, feature_cols, oracle_labels = load_real_iot_data(CSV_PATH, num_items=128)
+    print(f"\n[OK] Data loaded: {len(df_normalized)} records")
+    print(f"     Features: {feature_cols}")
+    if oracle_labels is not None:
+        print(f"     Ground-truth Oracle_Target labels found: {oracle_labels.sum()} faults")
 
     # Step 2: Define fault criterion
-    fault_labels, thresholds = define_fault_criterion(df_normalized, feature_cols)
+    fault_labels, thresholds = define_fault_criterion(df_normalized, feature_cols, oracle_labels)
     num_faults = sum(fault_labels)
     print(f"\n[OK] Fault criterion: {thresholds['method']}")
     print(f"     Detected {num_faults} faulty nodes")
